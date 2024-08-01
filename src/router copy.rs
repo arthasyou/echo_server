@@ -2,22 +2,24 @@ use crate::ftproto::{
     BsPlayArg, BsPlayResult, CancelArg, CancelResult, FruitPlayArg, FruitPlayResult, UserInfoArg,
     UserInfoResult,
 };
+use byteorder::{BigEndian, ByteOrder};
 use bytes::BytesMut;
 use prost::Message;
 
 pub async fn route_message(cmd: u16, data: BytesMut) -> Result<BytesMut, &'static str> {
     let payload = &data[..];
-    match cmd {
-        1001 => handle_user_info(payload).await.map(serialize_response),
-        2001 => handle_fruit_play(payload).await.map(serialize_response),
-        2002 => handle_bs_play(payload).await.map(serialize_response),
-        2003 => handle_cancel(payload).await.map(serialize_response),
-        _ => Err("Unknown command"),
-    }
-    .and_then(|res| res)
+    let response = match cmd {
+        1001 => serialize_response(handle_user_info(payload).await?).await?,
+        2001 => serialize_response(handle_fruit_play(payload).await?).await?,
+        2002 => serialize_response(handle_bs_play(payload).await?).await?,
+        2003 => serialize_response(handle_cancel(payload).await?).await?,
+        _ => return Err("Unknown command"),
+    };
+
+    Ok(response)
 }
 
-fn serialize_response<T: Message>(response: T) -> Result<BytesMut, &'static str> {
+async fn serialize_response<T: Message>(response: T) -> Result<BytesMut, &'static str> {
     let mut buf = BytesMut::with_capacity(response.encoded_len());
     response
         .encode(&mut buf)
