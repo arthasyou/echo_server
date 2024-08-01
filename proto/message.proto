@@ -1,0 +1,73 @@
+syntax = "proto3";
+option go_package = "./ftproto";
+package ftproto;
+
+// 包头6位 0～2 error_code 3~4 cmd 5~6 dataLength
+// proto放回结果 不需要code这个成功标记，如果errro_code 不为0表示错误，不解析proto
+// id表示玩家消息是不需要的，登入后服务端需要确定是哪个玩家，不能让前端来传玩家id
+// 不用浮点数都使用int
+
+// @tos_1001
+// 进入游戏 请求玩家信息
+message UserInfoArg {}
+
+// @toc_1001
+// 进入游戏 请求玩家信息
+message UserInfoResult {
+  uint32 user_id = 1;
+  string name = 2;
+  uint32 balance = 3;
+  string icon = 4;
+}
+
+// @tos_2001
+// 玩水果游戏 请求
+message FruitPlayArg{ 
+  string flag = 1; // 0=正常玩 1=续压
+  repeated Bet fruits = 2; // index-> 0=苹果 7=bar 从右往左
+}
+
+// @toc_2001
+// 玩水果游戏 响应结果
+message FruitPlayResult{
+  repeated uint32 lights = 1; // 亮灯位置 0=右边苹果 23=右边雪豹 顺时针
+  repeated Bet fruits = 2; // 投注情况 index-> 0=苹果 7=bar 从右往左
+  uint32 odds = 3; //赔率(0,1,2)
+  repeated Bet part = 4; // 中奖结果（推送所有8个水果）
+  uint32 win = 5; // 赢分
+  uint32 balance = 6; // 余额
+}
+
+// @tos_2002
+// 玩大小游戏 请求
+message BsPlayArg {
+  uint32 index = 1;//index-> 0=小 1=大; （只有一种下注不是大就是小
+  uint32 amount = 2; //  ）
+}
+
+// @toc_2002
+// 玩大小游戏 响应结果
+message BsPlayResult {
+  // string id = 1;
+  uint32 result = 3; // 2-6 8-12
+  uint32 win = 4; // 赢分 
+  uint32 balance = 5; // 余额
+}
+
+// @tos_2003
+// 撤注 请求
+message CancelArg {
+}
+
+// @toc_2003
+// 撤注 响应结果
+message CancelResult {
+  uint32 balance = 3; // 余额
+}
+
+// 
+message Bet {
+   uint32 index = 1; // 位置
+   uint32 amount = 2; // 投注金额/中奖分
+}
+
