@@ -16,7 +16,6 @@ const CHANNEL_POOL_SIZE: usize = 100;
 type Tx = mpsc::Sender<(u16, u16, BytesMut)>;
 type Rx = mpsc::Receiver<(u16, u16, BytesMut)>;
 
-#[derive(Clone)]
 struct ChannelPool {
     pool: Arc<Mutex<Vec<Tx>>>,
 }
