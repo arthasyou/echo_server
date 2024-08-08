@@ -1,16 +1,11 @@
-mod error;
-
 use byteorder::{BigEndian, ByteOrder}; // 用于解析字节序
 use bytes::BytesMut;
-// use connection::Connection;
-use error::Result;
+use connection::Connection;
 use futures_util::{SinkExt, StreamExt};
-use service_utils_rs::services::jwt::Jwt;
-use service_utils_rs::settings::Settings;
 use socket_events::SocketEvents;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
-
+use tokio_tungstenite::tungstenite::http::uri;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::{
     accept_hdr_async,
@@ -28,9 +23,8 @@ mod socket_events;
 mod socket_mgr;
 
 #[tokio::main]
-async fn main() -> Result<()> {
-    let settings = Settings::new("config/services.toml").unwrap();
-    let jwt = Jwt::new(settings.jwt);
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // 绑定监听地址
     let addr = "0.0.0.0:10301".to_string();
     let listener = TcpListener::bind(&addr).await?;
 
@@ -52,11 +46,11 @@ async fn main() -> Result<()> {
             Err(e) => println!("Websocket connection error : {}", e),
             Ok(ws_stream) => {
                 println!("New client addr: {}", client_addr);
-                tokio::spawn(handle_connection(
+                // tokio::spawn(handle_connection(ws_stream, token_info));
+                tokio::spawn(connection::handle_connection(
                     ws_stream,
                     sender.clone(),
                     token_info,
-                    jwt.clone(),
                 ));
             }
         }
@@ -73,23 +67,7 @@ async fn process_message(cmd: u16, message: BytesMut) -> (u16, u16, BytesMut) {
 }
 
 // 处理WebSocket连接的函数
-async fn handle_connection(
-    stream: WebSocketStream<TcpStream>,
-    sender: mpsc::UnboundedSender<SocketEvents>,
-    token_info: String,
-    jwt: Jwt,
-) {
-    // 验证 JWT
-    match jwt.validate_access_token(&token_info) {
-        Ok(claims) => {
-            println!("Token is valid: {:?}", claims);
-        }
-        Err(e) => {
-            eprintln!("Token validation error: {}", e);
-            return;
-        }
-    }
-
+async fn handle_connection(stream: WebSocketStream<TcpStream>) {
     // 拆分WebSocket流为写和读部分
     let (mut write, mut read) = stream.split();
 
@@ -149,6 +127,7 @@ async fn handle_connection(
 
                 println!(
                     "Received message:  cmd={}, data={:?}",
+                    // error_code,
                     cmd,
                     &message_data[..]
                 );
