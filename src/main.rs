@@ -1,3 +1,4 @@
+mod constant;
 mod error;
 
 use byteorder::{BigEndian, ByteOrder}; // 用于解析字节序
@@ -11,12 +12,15 @@ use socket_events::SocketEvents;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 
+use tokio_tungstenite::tungstenite::http;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::{
     accept_hdr_async,
     tungstenite::handshake::server::{Request, Response},
     tungstenite::Message,
 };
+
+use service_utils_rs::utils::string_util::QueryExtractor;
 
 pub mod ftproto {
     include!(concat!(env!("OUT_DIR"), "/ftproto.rs"));
@@ -42,22 +46,36 @@ async fn main() -> Result<()> {
 
     while let Ok((stream, client_addr)) = listener.accept().await {
         let mut token_info = String::new();
-        match accept_hdr_async(stream, |req: &Request, mut res: Response| {
-            let query = req.uri().query().unwrap_or("");
-            token_info.push_str(query);
+
+        let callback = |req: &Request, mut res: Response| {
+            if let Some(token) = req
+                .uri()
+                .query()
+                .and_then(|query| query.extract_value("token").map(|t| t.to_string()))
+            {
+                // match jwt.validate_access_token(&token) {
+                //     Ok(claims) => {
+                //         println!("claims: {:?}", claims);
+                //         token_info.push_str(&claims.sub);
+                //     }
+                //     Err(_) => *res.status_mut() = http::StatusCode::BAD_REQUEST,
+                // }
+            } else {
+                // *res.status_mut() = http::StatusCode::BAD_REQUEST;
+            }
             Ok(res)
-        })
-        .await
-        {
+        };
+
+        match accept_hdr_async(stream, callback).await {
             Err(e) => println!("Websocket connection error : {}", e),
             Ok(ws_stream) => {
                 println!("New client addr: {}", client_addr);
-                tokio::spawn(handle_connection(
-                    ws_stream,
-                    sender.clone(),
-                    token_info,
-                    jwt.clone(),
-                ));
+                // tokio::spawn(connection::handle_connection(
+                //     ws_stream,
+                //     sender.clone(),
+                //     token_info,
+                // ));
+                tokio::spawn(handle_connection(ws_stream, sender.clone(), token_info));
             }
         }
     }
@@ -77,19 +95,7 @@ async fn handle_connection(
     stream: WebSocketStream<TcpStream>,
     sender: mpsc::UnboundedSender<SocketEvents>,
     token_info: String,
-    jwt: Jwt,
 ) {
-    // 验证 JWT
-    match jwt.validate_access_token(&token_info) {
-        Ok(claims) => {
-            println!("Token is valid: {:?}", claims);
-        }
-        Err(e) => {
-            eprintln!("Token validation error: {}", e);
-            return;
-        }
-    }
-
     // 拆分WebSocket流为写和读部分
     let (mut write, mut read) = stream.split();
 
@@ -135,7 +141,6 @@ async fn handle_connection(
                 return;
             }
         };
-
         if message.is_binary() {
             let data = message.into_data();
 
