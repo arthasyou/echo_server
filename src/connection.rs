@@ -1,6 +1,11 @@
+use core::sync;
+
 use byteorder::{BigEndian, ByteOrder};
 use bytes::BytesMut;
-use futures_util::{stream::SplitSink, SinkExt, StreamExt};
+use futures_util::{
+    stream::{SplitSink, SplitStream},
+    SinkExt, StreamExt,
+};
 use tokio::{
     net::TcpStream,
     sync::mpsc::{self, Receiver, Sender, UnboundedSender},
@@ -10,6 +15,7 @@ use tokio_tungstenite::{tungstenite::Message, WebSocketStream};
 use crate::socket_events::SocketEvents;
 
 type SocketWriter = SplitSink<WebSocketStream<TcpStream>, Message>;
+type SocketReader = SplitStream<WebSocketStream<TcpStream>>;
 type MsgSender = Sender<(u16, u16, BytesMut)>;
 
 #[derive(Debug)]
@@ -45,8 +51,10 @@ pub async fn handle_connection(
     tokio::spawn(recieve_msg(rx, socket_writer));
 
     mgr_sender
-        .send(SocketEvents::Handshake(msg_sender, connection))
+        .send(SocketEvents::Handshake(connection))
         .unwrap();
+
+    handle_msg(socket_reader, msg_sender, mgr_sender).await;
 }
 
 async fn recieve_msg(mut rx: Receiver<(u16, u16, BytesMut)>, mut writer: SocketWriter) {
@@ -62,4 +70,67 @@ async fn recieve_msg(mut rx: Receiver<(u16, u16, BytesMut)>, mut writer: SocketW
             break;
         }
     }
+}
+
+async fn handle_msg(
+    mut read: SocketReader,
+    tx: MsgSender,
+    msg_sender: UnboundedSender<SocketEvents>,
+) {
+    // 读取客户端发送的消息
+    while let Some(message) = read.next().await {
+        let message = match message {
+            Ok(msg) => {
+                println!("received msg: {:?}", msg);
+                msg
+            }
+            Err(e) => {
+                eprintln!("Error receiving message: {}", e);
+                return;
+            }
+        };
+        if message.is_binary() {
+            let data = message.into_data();
+
+            if data.len() >= 2 {
+                // 解析包头
+                let cmd = BigEndian::read_u16(&data[0..2]);
+
+                // 提取数据部分
+                let payload = &data[2..];
+                let message_data = BytesMut::from(payload);
+
+                println!(
+                    "Received message:  cmd={}, data={:?}",
+                    cmd,
+                    &message_data[..]
+                );
+
+                // 发送消息到处理任务
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    // 异步处理消息
+                    let (response_error_code, response_cmd, processed_message) =
+                        process_message(cmd, message_data).await;
+                    // 将处理后的消息发送到通道
+                    tx.send((response_error_code, response_cmd, processed_message))
+                        .await
+                        .expect("Error sending processed message");
+                });
+            } else {
+                eprintln!("Header too short: {}", data.len());
+            }
+        }
+    }
+
+    // 连接关闭时，移除客户端
+    println!("WebSocket connection closed");
+    msg_sender.send(SocketEvents::Disconnect(1)).unwrap();
+}
+
+// 假设有一个异步处理函数
+async fn process_message(cmd: u16, message: BytesMut) -> (u16, u16, BytesMut) {
+    // 模拟数据处理逻辑
+    let error_code = 0; // 示例错误码/ 示例命令
+    (error_code, cmd, message)
 }

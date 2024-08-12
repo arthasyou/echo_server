@@ -22,7 +22,7 @@ impl SocketMgr {
         }
     }
 
-    pub fn add_connection(&mut self, name: String) -> Result<u32> {
+    pub fn add_connection(&mut self) -> Result<u32> {
         let id = if !self.connection_index_pool.is_empty() {
             self.connection_index_pool.pop().unwrap()
         } else if self.connection_indices < self.max_client {
@@ -38,13 +38,18 @@ impl SocketMgr {
 
         Ok(id)
     }
+
+    pub fn remove_connection(&mut self, id: &u32) {
+        println!("===============remove connection=========");
+        // self.connections.remove(id).unwrap();
+    }
 }
 
 pub async fn start_loop(mut reciever: UnboundedReceiver<SocketEvents>) {
     let mut mgr = SocketMgr::new();
     while let Some(event) = reciever.recv().await {
         match event {
-            SocketEvents::Handshake(tx, mut conn) => match mgr.add_connection(conn.name.clone()) {
+            SocketEvents::Handshake(mut conn) => match mgr.add_connection() {
                 Ok(id) => {
                     conn.id = id;
                     mgr.connections.insert(id, conn);
@@ -63,7 +68,7 @@ pub async fn start_loop(mut reciever: UnboundedReceiver<SocketEvents>) {
                     eprintln!("{}", e);
                 }
             },
-            SocketEvents::Disconnect(_) => todo!(),
+            SocketEvents::Disconnect(id) => mgr.remove_connection(&id),
         }
     }
 }
