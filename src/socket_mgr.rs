@@ -40,8 +40,50 @@ impl SocketMgr {
     }
 
     pub fn remove_connection(&mut self, id: &u32) {
-        println!("===============remove connection=========");
+        println!("===============remove connection=========: {}", id);
         // self.connections.remove(id).unwrap();
+    }
+
+    /// 广播消息给指定或所有连接的客户端
+    pub async fn broadcast_message(
+        &self,
+        error_code: u16,
+        cmd: u16,
+        message: Option<BytesMut>,
+        connection_ids: Option<Vec<u32>>,
+    ) {
+        match connection_ids {
+            Some(ids) => {
+                // 发送给指定的连接
+                for id in ids {
+                    if let Some(connection) = self.connections.get(&id) {
+                        if let Err(e) = connection
+                            .msg_sender
+                            .send((error_code, cmd, message.clone()))
+                            .await
+                        {
+                            eprintln!("Failed to send message to connection {}: {}", id, e);
+                        }
+                    }
+                }
+            }
+            None => {
+                // 发送给所有连接
+                for (id, connection) in &self.connections {
+                    if let Err(e) = connection
+                        .msg_sender
+                        .send((error_code, cmd, message.clone()))
+                        .await
+                    {
+                        eprintln!("Failed to send message to connection {}: {}", id, e);
+                    }
+                }
+                println!(
+                    "Broadcast message sent to {} clients",
+                    self.connections.len()
+                );
+            }
+        }
     }
 }
 
@@ -61,8 +103,7 @@ pub async fn start_loop(mut reciever: UnboundedReceiver<SocketEvents>) {
                     // }
                 }
                 Err(Error::ErrorCode(code)) => {
-                    let msg = BytesMut::new();
-                    let _ = conn.msg_sender.send((code, 0, msg));
+                    let _ = conn.msg_sender.send((code, 0, None));
                 }
                 Err(e) => {
                     eprintln!("{}", e);

@@ -22,6 +22,12 @@ pub enum Error {
 
     #[error("error code: {0}")]
     ErrorCode(u16),
+
+    #[error("proto encode error: {0}")]
+    ProtoEncodeError(#[from] prost::EncodeError),
+
+    #[error("proto decode error: {0}")]
+    ProtoDecodeError(#[from] prost::DecodeError),
 }
 
 pub type Result<T, E = Error> = core::result::Result<T, E>;

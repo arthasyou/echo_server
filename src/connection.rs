@@ -1,5 +1,3 @@
-use core::sync;
-
 use byteorder::{BigEndian, ByteOrder};
 use bytes::BytesMut;
 use futures_util::{
@@ -12,12 +10,25 @@ use tokio::{
 };
 use tokio_tungstenite::{tungstenite::Message, WebSocketStream};
 
-use crate::socket_events::SocketEvents;
+use crate::{
+    constant::error_code::SYSTEM_ERROR,
+    error::{Error, Result},
+    router::route_message,
+    socket_events::SocketEvents,
+};
 
+/// Alias for the writing half of a WebSocket connection.
 type SocketWriter = SplitSink<WebSocketStream<TcpStream>, Message>;
+/// Alias for the reading half of a WebSocket connection.
 type SocketReader = SplitStream<WebSocketStream<TcpStream>>;
-type MsgSender = Sender<(u16, u16, BytesMut)>;
+/// Type alias for a message containing an error code, command, and optional payload.
+type Msg = (u16, u16, Option<BytesMut>);
+/// Sender type alias for sending `Msg` between tasks.
+type MsgSender = Sender<Msg>;
+/// Receiver type alias for receiving `Msg` in a task.
+type MsgReciver = Receiver<Msg>;
 
+/// Represents a client connection.
 #[derive(Debug)]
 pub struct Connection {
     pub id: u32,
@@ -26,6 +37,16 @@ pub struct Connection {
 }
 
 impl Connection {
+    /// Creates a new `Connection` with the specified name and message sender.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - A `String` representing the connection's name.
+    /// * `msg_sender` - A `MsgSender` used to send messages to this connection.
+    ///
+    /// # Returns
+    ///
+    /// * A new `Connection` instance.
     pub fn new(name: String, msg_sender: MsgSender) -> Self {
         Self {
             id: 0,
@@ -35,49 +56,91 @@ impl Connection {
     }
 }
 
+/// Handles a new WebSocket connection.
+///
+/// This function splits the WebSocket stream into a writer and reader,
+/// and then spawns tasks to handle sending and receiving messages.
+///
+/// # Arguments
+///
+/// * `ws_stream` - The WebSocket stream associated with the connection.
+/// * `mgr_sender` - An unbounded sender used to communicate with the connection manager.
+/// * `token_info` - A `String` containing token information related to the connection.
 pub async fn handle_connection(
     ws_stream: WebSocketStream<TcpStream>,
     mgr_sender: UnboundedSender<SocketEvents>,
     token_info: String,
 ) {
     println!("token info: {}", token_info);
-    let (mut socket_writer, mut socket_reader) = ws_stream.split();
+    let (socket_writer, socket_reader) = ws_stream.split();
 
-    // 创建一个通道用于进程间通信
-    let (msg_sender, rx) = mpsc::channel::<(u16, u16, BytesMut)>(4);
+    // Create a channel for inter-task communication
+    let (msg_sender, rx) = mpsc::channel::<Msg>(4);
 
-    let connection = Connection::new(token_info, msg_sender.clone());
+    let mut connection = Connection::new(token_info, msg_sender.clone());
 
+    // Spawn a task to handle outgoing messages
     tokio::spawn(recieve_msg(rx, socket_writer));
 
+    // Store the connection ID after the handshake
+    let conn_id = connection.id;
+
+    // Send a handshake event to the connection manager
     mgr_sender
         .send(SocketEvents::Handshake(connection))
         .unwrap();
 
-    handle_msg(socket_reader, msg_sender, mgr_sender).await;
+    // Handle incoming messages from the client
+    handle_msg(socket_reader, msg_sender, mgr_sender, conn_id).await;
 }
 
-async fn recieve_msg(mut rx: Receiver<(u16, u16, BytesMut)>, mut writer: SocketWriter) {
+/// Receives messages from the message channel and sends them to the client.
+///
+/// This function processes messages from the `MsgReciver` and sends them
+/// to the WebSocket connection. If an error occurs while sending, the task exits.
+///
+/// # Arguments
+///
+/// * `rx` - A receiver channel for incoming messages.
+/// * `writer` - The WebSocket writer to send messages to the client.
+async fn recieve_msg(mut rx: MsgReciver, mut writer: SocketWriter) -> Result<()> {
     while let Some((error_code, cmd, response_data)) = rx.recv().await {
         let mut header = [0u8; 4];
         BigEndian::write_u16(&mut header[0..2], error_code);
         BigEndian::write_u16(&mut header[2..4], cmd);
-        let mut message = BytesMut::with_capacity(4 + response_data.len());
-        message.extend_from_slice(&header);
-        message.extend_from_slice(&response_data);
+
+        let mut message = BytesMut::from(&header[..]);
+        if let Some(data) = response_data {
+            message.extend_from_slice(&data);
+        }
+
         if let Err(e) = writer.send(Message::binary(message.freeze())).await {
             eprintln!("Error sending message: {}", e);
-            break;
+            return Err(Error::WsError(e));
         }
     }
+    println!("recieve_msg task is exiting due to connection drop or other error.");
+    Ok(())
 }
 
+/// Handles incoming messages from the WebSocket reader.
+///
+/// This function listens for incoming messages, processes them, and sends
+/// the processed results back to the client. If the connection is closed,
+/// it sends a disconnect event to the connection manager.
+///
+/// # Arguments
+///
+/// * `read` - The WebSocket reader stream to receive messages from the client.
+/// * `tx` - A sender channel for sending processed messages.
+/// * `msg_sender` - An unbounded sender used to communicate with the connection manager.
+/// * `connection_id` - The unique ID of the current connection.
 async fn handle_msg(
     mut read: SocketReader,
     tx: MsgSender,
     msg_sender: UnboundedSender<SocketEvents>,
-) {
-    // 读取客户端发送的消息
+    connection_id: u32,
+) -> Result<()> {
     while let Some(message) = read.next().await {
         let message = match message {
             Ok(msg) => {
@@ -86,17 +149,15 @@ async fn handle_msg(
             }
             Err(e) => {
                 eprintln!("Error receiving message: {}", e);
-                return;
+                return Err(Error::WsError(e));
             }
         };
         if message.is_binary() {
             let data = message.into_data();
 
             if data.len() >= 2 {
-                // 解析包头
                 let cmd = BigEndian::read_u16(&data[0..2]);
 
-                // 提取数据部分
                 let payload = &data[2..];
                 let message_data = BytesMut::from(payload);
 
@@ -106,16 +167,25 @@ async fn handle_msg(
                     &message_data[..]
                 );
 
-                // 发送消息到处理任务
                 let tx = tx.clone();
                 tokio::spawn(async move {
-                    // 异步处理消息
-                    let (response_error_code, response_cmd, processed_message) =
-                        process_message(cmd, message_data).await;
-                    // 将处理后的消息发送到通道
-                    tx.send((response_error_code, response_cmd, processed_message))
-                        .await
-                        .expect("Error sending processed message");
+                    match route_message(cmd, message_data).await {
+                        Ok(processed_message) => {
+                            if let Err(e) = tx.send((0, cmd, Some(processed_message))).await {
+                                eprintln!("Error sending processed message: {}", e);
+                            }
+                        }
+                        Err(Error::ErrorCode(error_code)) => {
+                            if let Err(e) = tx.send((error_code, cmd, None)).await {
+                                eprintln!("Error sending processed message: {}", e);
+                            }
+                        }
+                        Err(_) => {
+                            if let Err(e) = tx.send((SYSTEM_ERROR, cmd, None)).await {
+                                eprintln!("Error sending processed message: {}", e);
+                            }
+                        }
+                    };
                 });
             } else {
                 eprintln!("Header too short: {}", data.len());
@@ -123,14 +193,20 @@ async fn handle_msg(
         }
     }
 
-    // 连接关闭时，移除客户端
     println!("WebSocket connection closed");
-    msg_sender.send(SocketEvents::Disconnect(1)).unwrap();
+    msg_sender
+        .send(SocketEvents::Disconnect(connection_id))
+        .map_err(|e| Error::CustomError {
+            message: format!("Failed to send disconnect event: {}", e),
+            line: line!(),
+            column: column!(),
+        })?;
+
+    Ok(())
 }
 
-// 假设有一个异步处理函数
-async fn process_message(cmd: u16, message: BytesMut) -> (u16, u16, BytesMut) {
-    // 模拟数据处理逻辑
-    let error_code = 0; // 示例错误码/ 示例命令
-    (error_code, cmd, message)
-}
+// async fn process_message(cmd: u16, message: BytesMut) -> (u16, u16, BytesMut) {
+//     // Simulate message processing logic
+//     let error_code = 0; // Example error code
+//     (error_code, cmd, message)
+// }
